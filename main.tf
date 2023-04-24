@@ -56,7 +56,7 @@ resource "aws_internet_gateway" "internet_gateway" {
 resource "aws_subnet" "private_subnet" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.private_subnet_cidr
-  availability_zone       = "ap-south-1a"
+  availability_zone       = "ap-south-1b"
   map_public_ip_on_launch = false
 
   tags = {
@@ -110,20 +110,20 @@ resource "aws_security_group" "allow_tls" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description      = "allow_ssh_http"
-    from_port        = 22
-    to_port          = 22
-    protocol         = "tcp"
+    description = "allow_ssh_http"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "TCP"
     cidr_blocks = ["0.0.0.0/0"]
-    
+
   }
   ingress {
-    description      = "allow_ssh_http"
-    from_port        = 80
-    to_port          = 80
-    protocol         = "tcp"
+    description = "allow_ssh_http"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "TCP"
     cidr_blocks = ["0.0.0.0/0"]
-    
+
   }
 
   egress {
@@ -141,19 +141,119 @@ resource "aws_security_group" "allow_tls" {
 ##############################EC2############################
 
 
-resource "aws_instance" "myec2" {
-  ami                         = "ami-06fc49795bc410a0c"
-  subnet_id                   = aws_subnet.public_subnet.id
-  instance_type               = "t2.micro"
-  vpc_security_group_ids             = [aws_security_group.allow_tls.id]
-  key_name                    = "Golden Key"
-  associate_public_ip_address = true
-  user_data                   = file("install_apache.sh")
+# resource "aws_instance" "myec2" {
+#   ami                         = "ami-06fc49795bc410a0c"
+#   subnet_id                   = aws_subnet.public_subnet.id
+#   instance_type               = "t2.micro"
+#   vpc_security_group_ids      = [aws_security_group.allow_tls.id]
+#   key_name                    = "Golden Key"
+#   associate_public_ip_address = true
+#   user_data                   = file("install_apache.sh")
 
-  tags = {
-    "Name" = "apache"
-  }
-}
+#   tags = {
+#     "Name" = "apache"
+#   }
+# }
 
 #############################ALB##################################
 
+resource "aws_alb" "myalb" {
+  name               = "myalb2apache"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.allow_tls.id]
+  #subnets              = ["subnet-04136b737fa9def38", "subnet-00c9124901631c329"]
+
+  subnet_mapping {
+    subnet_id = aws_subnet.public_subnet.id
+  }
+
+  subnet_mapping {
+    subnet_id = aws_subnet.private_subnet.id
+  }
+
+  tags = {
+    name = "myalb"
+  }
+}
+
+resource "aws_alb_listener" "alb-http-listener" {
+  load_balancer_arn = aws_alb.myalb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_alb_target_group.mytg1.arn
+  }
+
+}
+
+resource "aws_alb_target_group" "mytg1" {
+  name        = "mytg1"
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      = aws_vpc.main.id
+
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 3
+    interval            = 30
+    path                = "/"
+
+
+  }
+
+}
+
+# resource "aws_alb_target_group_attachment" "mytg1" {
+#   target_group_arn = aws_alb_target_group.mytg1.arn
+#   target_id        = aws_instance.myec2.id
+#   port             = 80
+
+# }
+
+###################################ASG#############################
+
+# Define the launch configuration
+resource "aws_launch_configuration" "myasg-1" {
+  name_prefix     = "myasg-1"
+  image_id        = "ami-06fc49795bc410a0c"
+  instance_type   = "t2.micro"
+  key_name        = "Golden Key"
+  user_data       = file("install_apache.sh")
+  security_groups = [aws_security_group.allow_tls.id]
+}
+
+# Define the Auto Scaling Group
+resource "aws_autoscaling_group" "asg-group1" {
+  name_prefix          = "asg-group1"
+  launch_configuration = aws_launch_configuration.myasg-1.name
+  min_size             = 1
+  max_size             = 2
+  desired_capacity     = 2
+  vpc_zone_identifier  = [aws_subnet.public_subnet.id]
+  target_group_arns    = [aws_alb_target_group.mytg1.arn]
+
+  # Define the scaling policies
+  lifecycle {
+    create_before_destroy = true
+  }
+  tag {
+    key                 = "Environment"
+    value               = "production"
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Name"
+    value               = "example-asg"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_attachment" "asg-attach" {
+  autoscaling_group_name = aws_autoscaling_group.asg-group1.name
+  alb_target_group_arn   = aws_alb_target_group.mytg1.arn
+}
